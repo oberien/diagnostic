@@ -7,6 +7,7 @@ use codespan_reporting::files::{SimpleFile, Files, Location};
 use codespan_reporting::diagnostic::{Severity, Diagnostic, Label, LabelStyle};
 use codespan_reporting::term::{self, Config, termcolor::{StandardStream, ColorChoice}};
 use typed_arena::{ImmutableArena, Index};
+use std::borrow::Borrow;
 
 pub trait ErrorCode {
     fn code(&self) -> String;
@@ -88,7 +89,11 @@ pub struct Diagnostics {
     files: EvenSimplerFiles,
     stderr: StandardStream,
     config: Config,
-    error_printed: RefCell<bool>,
+    bugs_printed: RefCell<u32>,
+    errors_printed: RefCell<u32>,
+    warnings_printed: RefCell<u32>,
+    notes_printed: RefCell<u32>,
+    helps_printed: RefCell<u32>,
 }
 impl fmt::Debug for Diagnostics {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
@@ -104,7 +109,11 @@ impl Diagnostics {
             files: EvenSimplerFiles::new(),
             stderr: StandardStream::stderr(ColorChoice::Auto),
             config: Config::default(),
-            error_printed: RefCell::new(false),
+            bugs_printed: RefCell::new(0),
+            errors_printed: RefCell::new(0),
+            warnings_printed: RefCell::new(0),
+            notes_printed: RefCell::new(0),
+            helps_printed: RefCell::new(0),
         }
     }
 
@@ -114,8 +123,26 @@ impl Diagnostics {
         (FileId(idx), source)
     }
 
-    pub fn error_printed(&self) -> bool {
-        *self.error_printed.borrow()
+    /// Transforms a line and column (both 1-indexed) inside a file to their byte-offset.
+    pub fn resolve_line_column(&self, file: FileId, line: usize, column: usize) -> usize {
+        let line_start = self.files.borrow().line_range(file.0, line.saturating_sub(1)).unwrap();
+        line_start.start + column.saturating_sub(1)
+    }
+
+    pub fn bugs_printed(&self) -> u32 {
+        *self.bugs_printed.borrow()
+    }
+    pub fn errors_printed(&self) -> u32 {
+        *self.errors_printed.borrow()
+    }
+    pub fn warnings_printed(&self) -> u32 {
+        *self.warnings_printed.borrow()
+    }
+    pub fn notes_printed(&self) -> u32 {
+        *self.notes_printed.borrow()
+    }
+    pub fn helps_printed(&self) -> u32 {
+        *self.helps_printed.borrow()
     }
 
     fn diagnostic<E: ErrorCode>(&self, severity: Severity, code: E) -> DiagnosticBuilder<'_, E> {
@@ -130,7 +157,7 @@ impl Diagnostics {
         }
     }
     pub fn bug<E: ErrorCode>(&self, code: E) -> DiagnosticBuilder<'_, E> {
-        *self.error_printed.borrow_mut() = true;
+        *self.bugs_printed.borrow_mut() += 1;
         let mut diag =
             Some(self.diagnostic(Severity::Bug, code).with_note("please report this"));
         backtrace::trace(|frame| {
@@ -150,19 +177,22 @@ impl Diagnostics {
     }
 
     pub fn error<E: ErrorCode>(&self, code: E) -> DiagnosticBuilder<'_, E> {
-        *self.error_printed.borrow_mut() = true;
+        *self.errors_printed.borrow_mut() += 1;
         self.diagnostic(Severity::Error, code)
     }
 
     pub fn warning<E: ErrorCode>(&self, code: E) -> DiagnosticBuilder<'_, E> {
+        *self.warnings_printed.borrow_mut() += 1;
         self.diagnostic(Severity::Warning, code)
     }
 
     pub fn note<E: ErrorCode>(&self, code: E) -> DiagnosticBuilder<'_, E> {
+        *self.notes_printed.borrow_mut() += 1;
         self.diagnostic(Severity::Note, code)
     }
 
     pub fn help<E: ErrorCode>(&self, code: E) -> DiagnosticBuilder<'_, E> {
+        *self.helps_printed.borrow_mut() += 1;
         self.diagnostic(Severity::Help, code)
     }
 }
