@@ -2,12 +2,12 @@
 use std::fmt;
 use std::cell::RefCell;
 use std::ops::Range;
+use std::borrow::Borrow;
 
 use codespan_reporting::files::{SimpleFile, Files, Location};
 use codespan_reporting::diagnostic::{Severity, Diagnostic, Label, LabelStyle};
 use codespan_reporting::term::{self, Config, termcolor::{StandardStream, ColorChoice}};
-use typed_arena::{ImmutableArena, Index};
-use std::borrow::Borrow;
+use appendlist::AppendList;
 
 pub trait ErrorCode {
     fn code(&self) -> String;
@@ -33,57 +33,59 @@ impl Span {
 // Thus, here we implement the same thing, but using an Arena instead of a Vec, to allow
 // an immutable interface.
 struct EvenSimplerFiles {
-    files: ImmutableArena<SimpleFile<String, String>>,
+    files: AppendList<SimpleFile<String, String>>,
 }
 impl EvenSimplerFiles {
     pub fn new() -> Self {
         EvenSimplerFiles {
-            files: ImmutableArena::new(),
+            files: AppendList::new(),
         }
     }
-    pub fn add(&self, name: String, source: String) -> Index {
-        self.files.alloc(SimpleFile::new(name, source))
+    pub fn add(&self, name: String, source: String) -> FileId {
+        let idx = self.files.len();
+        self.files.push(SimpleFile::new(name, source));
+        FileId(idx)
     }
-    pub fn get(&self, idx: Index) -> &SimpleFile<String, String> {
-        self.files.get(idx)
+    pub fn get(&self, idx: FileId) -> &SimpleFile<String, String> {
+        self.files.get(idx.0).unwrap()
     }
 }
 impl<'a> Files<'a> for EvenSimplerFiles {
-    type FileId = Index;
+    type FileId = FileId;
     type Name = &'a str;
     type Source = &'a str;
 
     fn name(&'a self, id: Self::FileId) -> Option<Self::Name> {
-        Some(&self.files.get(id).name())
+        Some(&self.get(id).name())
     }
 
     fn source(&'a self, id: Self::FileId) -> Option<Self::Source> {
-        Some(&self.files.get(id).source())
+        Some(&self.get(id).source())
     }
 
     fn line_index(&'a self, id: Self::FileId, byte_index: usize) -> Option<usize> {
-        self.files.get(id).line_index((), byte_index)
+        self.get(id).line_index((), byte_index)
     }
 
     fn line_number(&'a self, id: Self::FileId, line_index: usize) -> Option<usize> {
-        self.files.get(id).line_number((), line_index)
+        self.get(id).line_number((), line_index)
     }
 
     fn column_number(&'a self, id: Self::FileId, line_index: usize, byte_index: usize) -> Option<usize> {
-        self.files.get(id).column_number((), line_index, byte_index)
+        self.get(id).column_number((), line_index, byte_index)
     }
 
     fn location(&'a self, id: Self::FileId, byte_index: usize) -> Option<Location> {
-        self.files.get(id).location((), byte_index)
+        self.get(id).location((), byte_index)
     }
 
     fn line_range(&'a self, id: Self::FileId, line_index: usize) -> Option<Range<usize>> {
-        self.files.get(id).line_range((), line_index)
+        self.get(id).line_range((), line_index)
     }
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
-pub struct FileId(Index);
+pub struct FileId(usize);
 
 pub struct Diagnostics {
     files: EvenSimplerFiles,
@@ -120,12 +122,12 @@ impl Diagnostics {
     pub fn add_file(&self, name: String, source: String) -> (FileId, &str) {
         let idx = self.files.add(name, source);
         let source = self.files.get(idx).source();
-        (FileId(idx), source)
+        (idx, source)
     }
 
     /// Transforms a line and column (both 1-indexed) inside a file to their byte-offset.
     pub fn resolve_line_column(&self, file: FileId, line: usize, column: usize) -> usize {
-        let line_start = self.files.borrow().line_range(file.0, line.saturating_sub(1)).unwrap();
+        let line_start = self.files.borrow().line_range(file, line.saturating_sub(1)).unwrap();
         line_start.start + column.saturating_sub(1)
     }
 
@@ -205,7 +207,7 @@ pub struct DiagnosticBuilder<'d, E: ErrorCode> {
 
     severity: Severity,
     code: E,
-    labels: Vec<Label<Index>>,
+    labels: Vec<Label<FileId>>,
     notes: Vec<String>,
 }
 
@@ -223,7 +225,7 @@ impl<'d, E: ErrorCode> DiagnosticBuilder<'d, E> {
     fn with_label<S: Into<String>>(mut self, style: LabelStyle, span: Span, message: S) -> Self {
         self.labels.push(Label {
             style,
-            file_id: span.file.0,
+            file_id: span.file,
             range: span.start..span.end,
             message: message.into(),
         });
