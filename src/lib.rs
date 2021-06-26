@@ -14,7 +14,7 @@ pub trait ErrorCode {
     fn message(&self) -> String;
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, Ord, PartialOrd, Hash)]
 pub struct Span {
     pub file: FileId,
     pub start: usize,
@@ -84,7 +84,7 @@ impl<'a> Files<'a> for EvenSimplerFiles {
     }
 }
 
-#[derive(Debug, Clone, Copy, Eq, PartialEq, Hash)]
+#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct FileId(usize);
 
 pub struct Diagnostics {
@@ -129,6 +129,9 @@ impl Diagnostics {
     pub fn resolve_line_column(&self, file: FileId, line: usize, column: usize) -> usize {
         let line_start = self.files.borrow().line_range(file, line.saturating_sub(1)).unwrap();
         line_start.start + column.saturating_sub(1)
+    }
+    pub fn resolve_span(&self, span: Span) -> &str {
+        &self.files.files.get(span.file.0).unwrap().source()[span.start..span.end]
     }
 
     pub fn bugs_printed(&self) -> u32 {
