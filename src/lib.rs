@@ -125,6 +125,15 @@ impl Diagnostics {
         (idx, source)
     }
 
+    pub fn get_file(&self, file_id: FileId) -> &str {
+        // An invalid FileId can only be gotten via a different instance of Diagnostics.
+        // As this library supports multiple files for a single Diagnostic, there should only
+        // ever be a single instance of `Diagnostics`.
+        // If the user decides not only to use two different diagnostics, but also to
+        // use the FileIds interchangeably, panicking here should be fine.
+        self.files.source(file_id).unwrap()
+    }
+
     /// Transforms a line and column (both 1-indexed) inside a file to their byte-offset.
     pub fn resolve_line_column(&self, file: FileId, line: usize, column: usize) -> usize {
         let line_start = self.files.borrow().line_range(file, line.saturating_sub(1)).unwrap();
