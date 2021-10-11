@@ -86,6 +86,11 @@ impl<'a> Files<'a> for EvenSimplerFiles {
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash)]
 pub struct FileId(usize);
+impl fmt::Display for FileId {
+    fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
+        fmt::Display::fmt(&self.0, f)
+    }
+}
 
 pub struct Diagnostics {
     files: EvenSimplerFiles,
