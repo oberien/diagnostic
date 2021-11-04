@@ -8,6 +8,7 @@ use codespan_reporting::files::{SimpleFile, Files, Location};
 use codespan_reporting::diagnostic::{Severity, Diagnostic, Label, LabelStyle};
 use codespan_reporting::term::{self, Config, termcolor::{StandardStream, ColorChoice}};
 use appendlist::AppendList;
+use codespan_reporting::term::termcolor::Buffer;
 
 pub trait ErrorCode {
     fn code(&self) -> String;
@@ -92,9 +93,28 @@ impl fmt::Display for FileId {
     }
 }
 
+pub struct Output {
+    typ: OutputType,
+}
+enum OutputType {
+    StandardStream(StandardStream),
+    Buffered(Box<dyn Fn(String)>),
+}
+impl Output {
+    pub fn stdout() -> Output {
+        Output { typ: OutputType::StandardStream(StandardStream::stdout(ColorChoice::Auto)) }
+    }
+    pub fn stderr() -> Output {
+        Output { typ: OutputType::StandardStream(StandardStream::stderr(ColorChoice::Auto)) }
+    }
+    pub fn buffered(f: impl Fn(String) + 'static) -> Output {
+        Output { typ: OutputType::Buffered(Box::new(f)) }
+    }
+}
+
 pub struct Diagnostics {
     files: EvenSimplerFiles,
-    stderr: StandardStream,
+    output: Output,
     config: Config,
     bugs_printed: RefCell<u32>,
     errors_printed: RefCell<u32>,
@@ -112,9 +132,12 @@ impl fmt::Debug for Diagnostics {
 
 impl Diagnostics {
     pub fn new() -> Diagnostics {
+        Self::with_output(Output::stderr())
+    }
+    pub fn with_output(output: Output) -> Diagnostics {
         Diagnostics {
             files: EvenSimplerFiles::new(),
-            stderr: StandardStream::stderr(ColorChoice::Auto),
+            output,
             config: Config::default(),
             bugs_printed: RefCell::new(0),
             errors_printed: RefCell::new(0),
@@ -167,7 +190,7 @@ impl Diagnostics {
     fn diagnostic<E: ErrorCode>(&self, severity: Severity, code: E) -> DiagnosticBuilder<'_, E> {
         DiagnosticBuilder {
             files: &self.files,
-            stderr: &self.stderr,
+            output: &self.output,
             config: &self.config,
             severity,
             code,
@@ -219,7 +242,7 @@ impl Diagnostics {
 #[must_use = "call `emit` to emit the diagnostic"]
 pub struct DiagnosticBuilder<'d, E: ErrorCode> {
     files: &'d EvenSimplerFiles,
-    stderr: &'d StandardStream,
+    output: &'d Output,
     config: &'d Config,
 
     severity: Severity,
@@ -230,13 +253,22 @@ pub struct DiagnosticBuilder<'d, E: ErrorCode> {
 
 impl<'d, E: ErrorCode> DiagnosticBuilder<'d, E> {
     pub fn emit(self) {
-        let Self { files, stderr, config, severity, code, labels, notes } = self;
+        let Self { files, output, config, severity, code, labels, notes } = self;
         let diagnostic = Diagnostic { severity, message: code.message(), code: Some(code.code()), labels, notes };
 
-        let mut stderr = stderr.lock();
-        term::emit(&mut stderr, config, files, &diagnostic)
-            .expect("stderr is gone???");
-        // writeln!(&mut stderr).expect("stderr is gone???");
+        match &output.typ {
+            OutputType::StandardStream(std) => {
+                term::emit(&mut std.lock(), config, files, &diagnostic)
+                    .expect("error writing diagnostic to StandardStream");
+            }
+            OutputType::Buffered(f) => {
+                let mut buffer = Buffer::ansi();
+                term::emit(&mut buffer, config, files, &diagnostic)
+                    .expect("error writing diagnostic to Buffer");
+                let s = String::from_utf8(buffer.into_inner()).expect("error converting diagnostic Buffer to String");
+                f(s);
+            }
+        }
     }
 
     fn with_label<S: Into<String>>(mut self, style: LabelStyle, span: Span, message: S) -> Self {
