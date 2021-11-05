@@ -35,20 +35,40 @@ impl Span {
 // an immutable interface.
 struct EvenSimplerFiles {
     files: AppendList<SimpleFile<String, String>>,
+    synthetic_files: AppendList<(&'static str, SimpleFile<String, String>)>,
 }
 impl EvenSimplerFiles {
-    pub fn new() -> Self {
+    fn new() -> Self {
         EvenSimplerFiles {
             files: AppendList::new(),
+            synthetic_files: AppendList::new(),
         }
     }
-    pub fn add(&self, name: String, source: String) -> FileId {
+    fn add(&self, name: String, source: String) -> FileId {
         let idx = self.files.len();
         self.files.push(SimpleFile::new(name, source));
-        FileId(idx)
+        FileId(FileIdKind::File(idx))
     }
-    pub fn get(&self, idx: FileId) -> &SimpleFile<String, String> {
-        self.files.get(idx.0).unwrap()
+    fn add_synthetic(&self, name: &'static str, source: String) -> FileId {
+        let id = FileId(FileIdKind::Synthetic(name));
+        assert!(self.get_optional(id).is_none(), "synthetic file with name {} already added previously", name);
+        self.synthetic_files.push((name, SimpleFile::new(name.to_string(), source)));
+        id
+    }
+    fn get(&self, id: FileId) -> &SimpleFile<String, String> {
+        self.get_optional(id).unwrap()
+    }
+    fn get_optional(&self, id: FileId) -> Option<&SimpleFile<String, String>> {
+        match id.0 {
+            FileIdKind::File(idx) => self.files.get(idx),
+            FileIdKind::Synthetic(name) => self.synthetic_files.iter().find_map(|(n, f)| {
+                    if *n == name {
+                        Some(f)
+                    } else {
+                        None
+                    }
+                })
+        }
     }
 }
 impl<'a> Files<'a> for EvenSimplerFiles {
@@ -86,10 +106,23 @@ impl<'a> Files<'a> for EvenSimplerFiles {
 }
 
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash)]
-pub struct FileId(usize);
+pub struct FileId(FileIdKind);
+#[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash)]
+enum FileIdKind {
+    Synthetic(&'static str),
+    File(usize),
+}
+impl FileId {
+    pub const fn synthetic(path: &'static str) -> FileId {
+        FileId(FileIdKind::Synthetic(path))
+    }
+}
 impl fmt::Display for FileId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
-        fmt::Display::fmt(&self.0, f)
+        match &self.0 {
+            FileIdKind::Synthetic(path) => fmt::Display::fmt(path, f),
+            FileIdKind::File(id) => fmt::Display::fmt(id, f),
+        }
     }
 }
 
@@ -152,23 +185,28 @@ impl Diagnostics {
         let source = self.files.get(idx).source();
         (idx, source)
     }
+    /// Synthetic files are files keyed with a static name / path. Each name / path can only
+    /// exist once. Synthetic `FileId`s can be created via `FileId::synthetic` to refer to
+    /// those files.
+    pub fn add_synthetic_file(&self, name: &'static str, source: String) -> (FileId, &str) {
+        let id = self.files.add_synthetic(name, source);
+        let source = self.files.get(id).source();
+        (id, source)
+    }
 
+    /// Gets the file content as `&str`. Panics if the file id doesn't exist.
     pub fn get_file(&self, file_id: FileId) -> &str {
-        // An invalid FileId can only be gotten via a different instance of Diagnostics.
-        // As this library supports multiple files for a single Diagnostic, there should only
-        // ever be a single instance of `Diagnostics`.
-        // If the user decides not only to use two different diagnostics, but also to
-        // use the FileIds interchangeably, panicking here should be fine.
         self.files.source(file_id).unwrap()
     }
 
     /// Transforms a line and column (both 1-indexed) inside a file to their byte-offset.
+    /// Panics if the file id doesn't exist.
     pub fn resolve_line_column(&self, file: FileId, line: usize, column: usize) -> usize {
         let line_start = self.files.borrow().line_range(file, line.saturating_sub(1)).unwrap();
         line_start.start + column.saturating_sub(1)
     }
     pub fn resolve_span(&self, span: Span) -> &str {
-        &self.files.files.get(span.file.0).unwrap().source()[span.start..span.end]
+        &self.files.get(span.file).source()[span.start..span.end]
     }
 
     pub fn bugs_printed(&self) -> u32 {
