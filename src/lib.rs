@@ -1,7 +1,6 @@
-#![allow(dead_code)]
 use std::fmt;
 use std::cell::RefCell;
-use std::ops::Range;
+use std::ops::{Deref, Range};
 use std::borrow::Borrow;
 
 use codespan_reporting::files::{SimpleFile, Files, Location};
@@ -10,7 +9,7 @@ use codespan_reporting::term::{self, Config, termcolor::{StandardStream, ColorCh
 use appendlist::AppendList;
 use codespan_reporting::term::termcolor::Buffer;
 
-pub trait ErrorCode {
+pub trait ErrorCode: Clone {
     fn code(&self) -> String;
     fn message(&self) -> String;
 }
@@ -145,17 +144,22 @@ impl Output {
     }
 }
 
-pub struct Diagnostics {
+#[derive(Debug, Clone, Ord, PartialOrd, Eq, PartialEq, Hash)]
+pub enum Emitted<E: ErrorCode> {
+    Bug(E),
+    Error(E),
+    Warning(E),
+    Note(E),
+    Help(E),
+}
+
+pub struct Diagnostics<E: ErrorCode> {
     files: EvenSimplerFiles,
     output: Output,
     config: Config,
-    bugs_printed: RefCell<u32>,
-    errors_printed: RefCell<u32>,
-    warnings_printed: RefCell<u32>,
-    notes_printed: RefCell<u32>,
-    helps_printed: RefCell<u32>,
+    emitted: RefCell<Vec<Emitted<E>>>,
 }
-impl fmt::Debug for Diagnostics {
+impl<E: ErrorCode> fmt::Debug for Diagnostics<E> {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         f.debug_struct("Diagnostics")
             .field("...", &"...")
@@ -163,20 +167,16 @@ impl fmt::Debug for Diagnostics {
     }
 }
 
-impl Diagnostics {
-    pub fn new() -> Diagnostics {
+impl<E: ErrorCode> Diagnostics<E> {
+    pub fn new() -> Diagnostics<E> {
         Self::with_output(Output::stderr())
     }
-    pub fn with_output(output: Output) -> Diagnostics {
+    pub fn with_output(output: Output) -> Diagnostics<E> {
         Diagnostics {
             files: EvenSimplerFiles::new(),
             output,
             config: Config::default(),
-            bugs_printed: RefCell::new(0),
-            errors_printed: RefCell::new(0),
-            warnings_printed: RefCell::new(0),
-            notes_printed: RefCell::new(0),
-            helps_printed: RefCell::new(0),
+            emitted: RefCell::new(Vec::new()),
         }
     }
 
@@ -209,23 +209,11 @@ impl Diagnostics {
         &self.files.get(span.file).source()[span.start..span.end]
     }
 
-    pub fn bugs_printed(&self) -> u32 {
-        *self.bugs_printed.borrow()
-    }
-    pub fn errors_printed(&self) -> u32 {
-        *self.errors_printed.borrow()
-    }
-    pub fn warnings_printed(&self) -> u32 {
-        *self.warnings_printed.borrow()
-    }
-    pub fn notes_printed(&self) -> u32 {
-        *self.notes_printed.borrow()
-    }
-    pub fn helps_printed(&self) -> u32 {
-        *self.helps_printed.borrow()
+    pub fn emitted(&self) -> Vec<Emitted<E>> {
+        self.emitted.borrow().deref().clone()
     }
 
-    fn diagnostic<E: ErrorCode>(&self, severity: Severity, code: E) -> DiagnosticBuilder<'_, E> {
+    fn diagnostic(&self, severity: Severity, code: E) -> DiagnosticBuilder<'_, E> {
         DiagnosticBuilder {
             files: &self.files,
             output: &self.output,
@@ -236,8 +224,8 @@ impl Diagnostics {
             notes: Vec::new(),
         }
     }
-    pub fn bug<E: ErrorCode>(&self, code: E) -> DiagnosticBuilder<'_, E> {
-        *self.bugs_printed.borrow_mut() += 1;
+    pub fn bug(&self, code: E) -> DiagnosticBuilder<'_, E> {
+        self.emitted.borrow_mut().push(Emitted::Bug(code.clone()));
         let mut diag =
             Some(self.diagnostic(Severity::Bug, code).with_note("please report this"));
         backtrace::trace(|frame| {
@@ -256,23 +244,23 @@ impl Diagnostics {
         diag.unwrap()
     }
 
-    pub fn error<E: ErrorCode>(&self, code: E) -> DiagnosticBuilder<'_, E> {
-        *self.errors_printed.borrow_mut() += 1;
+    pub fn error(&self, code: E) -> DiagnosticBuilder<'_, E> {
+        self.emitted.borrow_mut().push(Emitted::Error(code.clone()));
         self.diagnostic(Severity::Error, code)
     }
 
-    pub fn warning<E: ErrorCode>(&self, code: E) -> DiagnosticBuilder<'_, E> {
-        *self.warnings_printed.borrow_mut() += 1;
+    pub fn warning(&self, code: E) -> DiagnosticBuilder<'_, E> {
+        self.emitted.borrow_mut().push(Emitted::Warning(code.clone()));
         self.diagnostic(Severity::Warning, code)
     }
 
-    pub fn note<E: ErrorCode>(&self, code: E) -> DiagnosticBuilder<'_, E> {
-        *self.notes_printed.borrow_mut() += 1;
+    pub fn note(&self, code: E) -> DiagnosticBuilder<'_, E> {
+        self.emitted.borrow_mut().push(Emitted::Note(code.clone()));
         self.diagnostic(Severity::Note, code)
     }
 
-    pub fn help<E: ErrorCode>(&self, code: E) -> DiagnosticBuilder<'_, E> {
-        *self.helps_printed.borrow_mut() += 1;
+    pub fn help(&self, code: E) -> DiagnosticBuilder<'_, E> {
+        self.emitted.borrow_mut().push(Emitted::Help(code.clone()));
         self.diagnostic(Severity::Help, code)
     }
 }
