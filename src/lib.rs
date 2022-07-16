@@ -199,6 +199,11 @@ impl<E: ErrorCode> Diagnostics<E> {
         self.files.source(file_id).unwrap()
     }
 
+    /// Get file name of given file id. Panics if the file id doesn't exist.
+    pub fn file_name(&self, file_id: FileId) -> &str {
+        self.files.name(file_id).unwrap()
+    }
+
     /// Transforms a line and column (both 1-indexed) inside a file to their byte-offset.
     /// Panics if the file id doesn't exist.
     pub fn resolve_line_column(&self, file: FileId, line: usize, column: usize) -> usize {
