@@ -3,7 +3,7 @@ use std::cell::RefCell;
 use std::ops::{Deref, Range};
 use std::borrow::Borrow;
 
-use codespan_reporting::files::{SimpleFile, Files, Location};
+use codespan_reporting::files::{SimpleFile, Files, Location, Error};
 use codespan_reporting::diagnostic::{Severity, Diagnostic, Label, LabelStyle};
 use codespan_reporting::term::{self, Config, termcolor::{StandardStream, ColorChoice}};
 use appendlist::AppendList;
@@ -54,8 +54,8 @@ impl EvenSimplerFiles {
         self.synthetic_files.push((name, SimpleFile::new(name.to_string(), source)));
         id
     }
-    fn get(&self, id: FileId) -> &SimpleFile<String, String> {
-        self.get_optional(id).unwrap()
+    fn get(&self, id: FileId) -> Result<&SimpleFile<String, String>, Error> {
+        self.get_optional(id).ok_or(Error::FileMissing)
     }
     fn get_optional(&self, id: FileId) -> Option<&SimpleFile<String, String>> {
         match id.0 {
@@ -75,32 +75,32 @@ impl<'a> Files<'a> for EvenSimplerFiles {
     type Name = &'a str;
     type Source = &'a str;
 
-    fn name(&'a self, id: Self::FileId) -> Option<Self::Name> {
-        Some(&self.get(id).name())
+    fn name(&'a self, id: Self::FileId) -> Result<Self::Name, Error> {
+        Ok(&self.get(id)?.name())
     }
 
-    fn source(&'a self, id: Self::FileId) -> Option<Self::Source> {
-        Some(&self.get(id).source())
+    fn source(&'a self, id: Self::FileId) -> Result<Self::Source, Error> {
+        Ok(&self.get(id)?.source())
     }
 
-    fn line_index(&'a self, id: Self::FileId, byte_index: usize) -> Option<usize> {
-        self.get(id).line_index((), byte_index)
+    fn line_index(&'a self, id: Self::FileId, byte_index: usize) -> Result<usize, Error> {
+        self.get(id)?.line_index((), byte_index)
     }
 
-    fn line_number(&'a self, id: Self::FileId, line_index: usize) -> Option<usize> {
-        self.get(id).line_number((), line_index)
+    fn line_number(&'a self, id: Self::FileId, line_index: usize) -> Result<usize, Error> {
+        self.get(id)?.line_number((), line_index)
     }
 
-    fn column_number(&'a self, id: Self::FileId, line_index: usize, byte_index: usize) -> Option<usize> {
-        self.get(id).column_number((), line_index, byte_index)
+    fn column_number(&'a self, id: Self::FileId, line_index: usize, byte_index: usize) -> Result<usize, Error> {
+        self.get(id)?.column_number((), line_index, byte_index)
     }
 
-    fn location(&'a self, id: Self::FileId, byte_index: usize) -> Option<Location> {
-        self.get(id).location((), byte_index)
+    fn location(&'a self, id: Self::FileId, byte_index: usize) -> Result<Location, Error> {
+        self.get(id)?.location((), byte_index)
     }
 
-    fn line_range(&'a self, id: Self::FileId, line_index: usize) -> Option<Range<usize>> {
-        self.get(id).line_range((), line_index)
+    fn line_range(&'a self, id: Self::FileId, line_index: usize) -> Result<Range<usize>, Error> {
+        self.get(id)?.line_range((), line_index)
     }
 }
 
@@ -182,7 +182,7 @@ impl<E: ErrorCode> Diagnostics<E> {
 
     pub fn add_file(&self, name: String, source: String) -> (FileId, &str) {
         let idx = self.files.add(name, source);
-        let source = self.files.get(idx).source();
+        let source = self.files.get(idx).unwrap().source();
         (idx, source)
     }
     /// Synthetic files are files keyed with a static name / path. Each name / path can only
@@ -190,7 +190,7 @@ impl<E: ErrorCode> Diagnostics<E> {
     /// those files.
     pub fn add_synthetic_file(&self, name: &'static str, source: String) -> (FileId, &str) {
         let id = self.files.add_synthetic(name, source);
-        let source = self.files.get(id).source();
+        let source = self.files.get(id).unwrap().source();
         (id, source)
     }
 
@@ -211,7 +211,7 @@ impl<E: ErrorCode> Diagnostics<E> {
         line_start.start + column.saturating_sub(1)
     }
     pub fn resolve_span(&self, span: Span) -> &str {
-        &self.files.get(span.file).source()[span.start..span.end]
+        &self.files.get(span.file).unwrap().source()[span.start..span.end]
     }
 
     pub fn emitted(&self) -> Vec<Emitted<E>> {
