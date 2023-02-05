@@ -25,6 +25,87 @@ impl Span {
     pub const fn new(file: FileId, start: usize, end: usize) -> Span {
         Span { file, start, end }
     }
+
+    /// Returns a new span starting from `by` bytes before the old span
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new start is <0.
+    #[must_use = "`Span::extend_start` returns a new `Span`"]
+    pub fn extend_start(&self, by: usize) -> Span {
+        Span {
+            file: self.file,
+            start: self.start.checked_sub(by).unwrap(),
+            end: self.end,
+        }
+    }
+    /// Returns a new span ending `by` bytes after the old span
+    ///
+    /// # Panics
+    ///
+    /// Panics if the new end doesn't fit `usize`.
+    #[must_use = "`Span::extend_end` returns a new `Span`"]
+    pub fn extend_end(&self, by: usize) -> Span {
+        Span {
+            file: self.file,
+            start: self.start,
+            end: self.end.checked_sub(by).unwrap(),
+        }
+    }
+
+    /// Returns a new span with `end: start + new_len`.
+    #[must_use = "`Span::new_len` returns a new `Span`"]
+    pub fn with_len(&self, new_len: usize) -> Span {
+        Span {
+            file: self.file,
+            start: self.start,
+            end: self.start + new_len,
+        }
+    }
+
+    #[must_use = "`Span::map_start` returns a new `Span`"]
+    pub fn map_start<F: FnOnce(usize) -> usize>(&self, f: F) -> Span {
+        Span {
+            file: self.file,
+            start: f(self.start),
+            end: self.end,
+        }
+    }
+    #[must_use = "`Span::map_end` returns a new `Span`"]
+    pub fn map_end<F: FnOnce(usize) -> usize>(&self, f: F) -> Span {
+        Span {
+            file: self.file,
+            start: self.start,
+            end: f(self.end),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct Spanned<T> {
+    pub value: T,
+    pub span: Span,
+}
+
+impl<T> Spanned<T> {
+    pub fn new(value: T, span: Span) -> Spanned<T> {
+        Spanned { value, span }
+    }
+
+    pub fn as_ref(&self) -> Spanned<&T> {
+        Spanned {
+            value: &self.value,
+            span: self.span,
+        }
+    }
+
+    pub fn map<R>(self, f: impl FnOnce(T) -> R) -> Spanned<R> {
+        let Spanned  { value, span } = self;
+        Spanned {
+            value: f(value),
+            span,
+        }
+    }
 }
 
 // codespan_reporting::SimpleFiles requires `&mut self` when adding a file,
@@ -210,8 +291,18 @@ impl<E: ErrorCode> Diagnostics<E> {
         let line_start = self.files.borrow().line_range(file, line.saturating_sub(1)).unwrap();
         line_start.start + column.saturating_sub(1)
     }
+    /// Returns the string content of the given Span
     pub fn resolve_span(&self, span: Span) -> &str {
         &self.files.get(span.file).unwrap().source()[span.start..span.end]
+    }
+
+    /// Returns the Span of the line containing the start of the given Span (excluding the newline)
+    pub fn first_line(&self, span: Span) -> Span {
+        let line_index = self.files.line_index(span.file, span.start).unwrap();
+        let line_range = self.files.line_range(span.file, line_index).unwrap();
+        // get rid of newline
+        let len = self.resolve_span(Span::new(span.file, line_range.start, line_range.end)).trim_end().len();
+        Span::new(span.file, line_range.start, line_range.start + len)
     }
 
     pub fn emitted(&self) -> Vec<Emitted<E>> {
