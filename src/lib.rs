@@ -2,6 +2,7 @@ use std::fmt;
 use std::cell::RefCell;
 use std::ops::{Deref, Range};
 use std::borrow::Borrow;
+use std::sync::atomic::{AtomicUsize, Ordering};
 
 use codespan_reporting::files::{SimpleFile, Files, Location, Error};
 use codespan_reporting::diagnostic::{Severity, Diagnostic, Label, LabelStyle};
@@ -111,17 +112,22 @@ impl<T> Spanned<T> {
 // codespan_reporting::SimpleFiles requires `&mut self` when adding a file,
 // making it impossible to have an immutable interface to put a string in it
 // and return an immutable &str.
-// Thus, here we implement the same thing, but using an Arena instead of a Vec, to allow
+// Thus, here we implement the same thing, but use an Arena instead of a Vec, to allow
 // an immutable interface.
 struct EvenSimplerFiles {
+    /// regular files added via name and content
     files: AppendList<SimpleFile<String, String>>,
-    synthetic_files: AppendList<(&'static str, SimpleFile<String, String>)>,
+    /// synthetic named files with a `&'static str` as name
+    synthetic_named_files: AppendList<(&'static str, SimpleFile<String, String>)>,
+    /// synthetic numbered files in insertion order (numbers unordered and possibly with holes)
+    synthetic_numbered_files: AppendList<(usize, SimpleFile<String, String>)>,
 }
 impl EvenSimplerFiles {
     fn new() -> Self {
         EvenSimplerFiles {
             files: AppendList::new(),
-            synthetic_files: AppendList::new(),
+            synthetic_named_files: AppendList::new(),
+            synthetic_numbered_files: AppendList::new(),
         }
     }
     fn add(&self, name: String, source: String) -> FileId {
@@ -129,11 +135,19 @@ impl EvenSimplerFiles {
         self.files.push(SimpleFile::new(name, source));
         FileId(FileIdKind::File(idx))
     }
-    fn add_synthetic(&self, name: &'static str, source: String) -> FileId {
-        let id = FileId(FileIdKind::Synthetic(name));
-        assert!(self.get_optional(id).is_none(), "synthetic file with name {} already added previously", name);
-        self.synthetic_files.push((name, SimpleFile::new(name.to_string(), source)));
+    fn add_synthetic_named(&self, name: &'static str, source: String) -> FileId {
+        let id = FileId(FileIdKind::SyntheticNamed(name));
+        assert!(self.get_optional(id).is_none(), "synthetic named file with name {} already added previously", name);
+        self.synthetic_named_files.push((name, SimpleFile::new(name.to_string(), source)));
         id
+    }
+    fn add_synthetic_numbered(&self, id: FileId, name: String, source: String) {
+        let num = match id.0 {
+            FileIdKind::SyntheticNumbered(num) => num,
+            _ => panic!("tried to add synthetic numbered file but passed non-synthetic-numbered-FileId `{}`", id),
+        };
+        assert!(self.get_optional(id).is_none(), "synthetic numbered file {} already added previously", id);
+        self.synthetic_numbered_files.push((num, SimpleFile::new(name, source)));
     }
     fn get(&self, id: FileId) -> Result<&SimpleFile<String, String>, Error> {
         self.get_optional(id).ok_or(Error::FileMissing)
@@ -141,13 +155,8 @@ impl EvenSimplerFiles {
     fn get_optional(&self, id: FileId) -> Option<&SimpleFile<String, String>> {
         match id.0 {
             FileIdKind::File(idx) => self.files.get(idx),
-            FileIdKind::Synthetic(name) => self.synthetic_files.iter().find_map(|(n, f)| {
-                    if *n == name {
-                        Some(f)
-                    } else {
-                        None
-                    }
-                })
+            FileIdKind::SyntheticNamed(name) => self.synthetic_named_files.iter().find_map(|(n, f)| (*n == name).then_some(f)),
+            FileIdKind::SyntheticNumbered(num) => self.synthetic_numbered_files.iter().find_map(|(n, f)| (*n == num).then_some(f)),
         }
     }
 }
@@ -189,19 +198,25 @@ impl<'a> Files<'a> for EvenSimplerFiles {
 pub struct FileId(FileIdKind);
 #[derive(Debug, Clone, Copy, Eq, PartialEq, PartialOrd, Ord, Hash)]
 enum FileIdKind {
-    Synthetic(&'static str),
     File(usize),
+    SyntheticNamed(&'static str),
+    SyntheticNumbered(usize),
 }
+static SYNTHETIC_NUMBERED_COUNTER: AtomicUsize = AtomicUsize::new(0);
 impl FileId {
-    pub const fn synthetic(path: &'static str) -> FileId {
-        FileId(FileIdKind::Synthetic(path))
+    pub const fn synthetic_named(path: &'static str) -> FileId {
+        FileId(FileIdKind::SyntheticNamed(path))
+    }
+    pub fn new_synthetic_numbered() -> FileId {
+        FileId(FileIdKind::SyntheticNumbered(SYNTHETIC_NUMBERED_COUNTER.fetch_add(1, Ordering::SeqCst)))
     }
 }
 impl fmt::Display for FileId {
     fn fmt(&self, f: &mut fmt::Formatter) -> fmt::Result {
         match &self.0 {
-            FileIdKind::Synthetic(path) => fmt::Display::fmt(path, f),
-            FileIdKind::File(id) => fmt::Display::fmt(id, f),
+            FileIdKind::File(id) => write!(f, "file {id}"),
+            FileIdKind::SyntheticNamed(name) => write!(f, "synthetic named {name:?}"),
+            FileIdKind::SyntheticNumbered(id) => write!(f, "synthetic numbered: {id}"),
         }
     }
 }
@@ -234,6 +249,36 @@ pub enum Emitted<E: ErrorCode> {
     Help(E),
 }
 
+/// There are 3 different ways to add files:
+/// 1. Regular files added via name and content:
+///    Usually when creating diagnostics, you have a filename and file content.
+///    You add those after reading the file via `Diagnostics::add_file`, which returns a reference
+///    to the file content which lives as long as the diagnostics.
+///    You operate on that reference, e.g. parse code creating spans for each token and expression.
+///    You use those spans to generate diagnostics in case of errors or warnings.
+/// 2. Synthetic Named Files:
+///    In some cases it's not possible to add all of the code before getting the FileId.
+///    For example in static or constant code it's impossible to bind something to the lifetime of
+///    the Diagnostic, e.g. when generating code in a derive macro.
+///    Instead, `FileId::synthetic(&'static str)` can be used to refer to a file that hasn't yet
+///    been added.
+///    However, `Diagnostics::add_synthetic_named_file` must be used to associate the synthetic
+///    named file to its content / source before any access to the synthetic file's code is
+///    performed - otherwise any access like printing diagnostics will result in a panic.
+/// 3. Synthetic Numbered Files:
+///    Another use-case is to have regular rust code generate code to be added as a future file.
+///    For example when performing AST transformations, new source code is generated while new
+///    expressions are created.
+///    In those cases the Spans and code must be generated at the same time.
+///    Regular file-ids can't be used as the code would need to be fully known before any span can
+///    be created.
+///    Synthetic files might not be suitable if the file-name depends on other factors.
+///    In those cases synthetic numbered files can be used.
+///    Using `FileId::new_synthetic_numbered` it's possible to get a file-id before the code is known.
+///    Once all spans are created and the code generated, the code can be added to the diagnostics
+///    via `Diagnostics::add_synthetic_numbered_file`.
+///    That function must be called before any of the spans is used, as the file-id is otherwise
+///    unknown and printing diagnostics will panic.
 pub struct Diagnostics<E: ErrorCode> {
     files: EvenSimplerFiles,
     output: Output,
@@ -266,11 +311,13 @@ impl<E: ErrorCode> Diagnostics<E> {
         let source = self.files.get(idx).unwrap().source();
         (idx, source)
     }
-    /// Synthetic files are files keyed with a static name / path. Each name / path can only
-    /// exist once. Synthetic `FileId`s can be created via `FileId::synthetic` to refer to
-    /// those files.
-    pub fn add_synthetic_file(&self, name: &'static str, source: String) -> (FileId, &str) {
-        let id = self.files.add_synthetic(name, source);
+    pub fn add_synthetic_named_file(&self, name: &'static str, source: String) -> (FileId, &str) {
+        let id = self.files.add_synthetic_named(name, source);
+        let source = self.files.get(id).unwrap().source();
+        (id, source)
+    }
+    pub fn add_synthetic_numbered_file(&self, id: FileId, name: String, source: String) -> (FileId, &str) {
+        self.files.add_synthetic_numbered(id, name, source);
         let source = self.files.get(id).unwrap().source();
         (id, source)
     }
